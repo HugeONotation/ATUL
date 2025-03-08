@@ -5,28 +5,125 @@
 
 #include <aul/containers/Allocator_aware_base.hpp>
 
-#include <tuple>
 #include <memory_resource>
 
 namespace atul {
 
-    template<std::size_t SB_size>
-    class SBO_function_base {
-    protected:
+    //=====================================================
+    // Callable wrappers
+    //=====================================================
 
-        alignas(atul::bit_floor(SB_size)) std::byte sbo_buffer[SB_size];
+    ///
+    /// Virtual interface which presents a uniform interface for calling
+    /// functions wrapped by instance of Callable_wrapper template classes.
+    ///
+    template<class Ret, class...Args>
+    struct Callable_interface {
 
+        virtual ~Callable_interface() = default;
+
+        virtual Ret call(Args&&...args) = 0;
+
+        virtual void move_constructor_delegate(std::byte* ptr) = 0;
+
+        virtual void copy_constructor_delegate(std::byte* ptr) = 0;
+
+        virtual std::size_t size_of() = 0;
+
+        virtual const std::type_info& target_type() = 0;
+
+        virtual void* target() = 0;
     };
 
-    template<>
-    class SBO_function_base<0> {
-    protected:
+    ///
+    /// Templated wrapper around callable types which implement a common
+    /// interface.
+    ///
+    /// @tparam Callable A callable type
+    template<class Callable, class Ret, class...Args>
+    struct Callable_wrapper final : Callable_interface<Ret, Args...> {
 
-        alignas(1) std::byte sbo_buffer[0];
+        explicit Callable_wrapper(const Callable& c):
+            callable(c) {}
 
+        Callable_wrapper(const Callable_wrapper& other):
+            callable(other.callable)
+        {}
+
+        Callable_wrapper(Callable_wrapper&& other) :
+            callable(std::forward<Callable>(other.callable))
+        {}
+
+        Ret call(Args&&...args) override {
+            return callable(std::forward<Args>(args)...);
+        }
+
+        void move_constructor_delegate(std::byte* ptr) override {
+            new (ptr) Callable_wrapper{std::move(*this)};
+        }
+
+        void copy_constructor_delegate(std::byte* ptr) override {
+            new (ptr) Callable_wrapper{*this};
+        }
+
+        std::size_t size_of() override {
+            return sizeof(Callable_wrapper);
+        }
+
+        const std::type_info& target_type() override {
+            return typeid(Callable);
+        }
+
+        void* target() override {
+            return reinterpret_cast<void*>(&callable);
+        }
+
+        Callable callable;
     };
 
-    template<class Alloc, std::size_t SB_size, class C>
+    template<class Ret, class...Args>
+    struct Callable_wrapper<Ret(Args...), Ret, Args...> final : Callable_interface<Ret, Args...> {
+
+        using Callable = Ret(Args...);
+
+        explicit Callable_wrapper(const Callable&) {}
+
+        Callable_wrapper(const Callable_wrapper&) {}
+
+        Callable_wrapper(Callable_wrapper&&) noexcept {}
+
+        Ret call(Args&&...args) final {
+            return callable(std::forward<Args>(args)...);
+        }
+
+        void move_constructor_delegate(std::byte* ptr) final {
+            new (ptr) Callable_wrapper{std::move(*this)};
+        }
+
+        void copy_constructor_delegate(std::byte* ptr) final {
+            new (ptr) Callable_wrapper{*this};
+        }
+
+        std::size_t size_of() final {
+            return sizeof(Callable_wrapper);
+        }
+
+        const std::type_info& target_type() final {
+            return typeid(Callable);
+        }
+
+        void* target() final {
+            return reinterpret_cast<void*>(&callable);
+        }
+
+        Callable callable;
+    };
+
+    //=====================================================
+    // AA_SBO_function
+    //=====================================================
+
+    template<class A, std::size_t SB_size, class C>
     class AA_SBO_function;
 
     ///
@@ -41,60 +138,8 @@ namespace atul {
     /// @tparam Ret Callable return type
     /// @tparam Args Callable argument types
     template<class A, std::size_t SB_size, class Ret, class...Args>
-    class AA_SBO_function<A, SB_size, Ret (Args...)> :
-        public SBO_function_base<SB_size>,
-        public aul::Allocator_aware_base<A> {
-
-        using sbo_base = SBO_function_base<SB_size>;
+    class AA_SBO_function<A, SB_size, Ret (Args...)> : public aul::Allocator_aware_base<A> {
         using a_base = aul::Allocator_aware_base<A>;
-
-        class Callable_interface {
-        public:
-
-            Callable_interface(Callable_interface&&);
-
-            virtual ~Callable_interface() = default;
-
-            virtual Ret call(Args&&...args) = 0;
-
-            virtual void move_constructor_delegate(const std::byte* ptr) = 0;
-
-            virtual void copy_constructor_delegate(const std::byte* ptr) = 0;
-
-            virtual const std::type_info& target_type() = 0;
-
-            virtual void* target() = 0;
-        };
-
-        template<class Callable>
-        class Callable_wrapper : public Callable_interface {
-        public:
-
-            explicit Callable_wrapper(const Callable& c):
-                callable(c) {}
-
-            Ret call(Args&&...args) final {
-                return callable(std::forward<Args>(args)...);
-            }
-
-            void move_constructor_delegate(const std::byte* ptr) final {
-                new (ptr) Callable_wrapper{std::move(*this)};
-            }
-
-            void copy_constructor_delegate(const std::byte* ptr) final {
-                new (ptr) Callable_wrapper{*this};
-            }
-
-            const std::type_info& target_type() final {
-                return typeid(Callable);
-            }
-
-            void* target() final {
-                return reinterpret_cast<void*>(&callable);
-            }
-
-            Callable callable;
-        };
 
     public:
 
@@ -108,10 +153,9 @@ namespace atul {
         // -ctors
         //=================================================
 
-        AA_SBO_function()= default;
+        AA_SBO_function() = default;
 
         explicit AA_SBO_function(std::nullptr_t):
-
             callable() {}
 
         AA_SBO_function(const AA_SBO_function& other):
@@ -122,8 +166,8 @@ namespace atul {
             }
 
             if (other.is_sbo_in_use()) {
-                other.callable->copy_constructor_delegate(sbo_base::sbo_buffer);
-                callable = reinterpret_cast<Callable_interface*>(sbo_base::sbo_buffer);
+                other.callable->copy_constructor_delegate(sbo_buffer);
+                callable = reinterpret_cast<Callable_interface<Ret, Args...>*>(sbo_buffer);
             } else {
                 acquire_callable(other.callable);
             }
@@ -138,8 +182,8 @@ namespace atul {
             }
 
             if (other.is_sbo_in_use()) {
-                other.callable->move_constructor_delegate(sbo_base::sbo_buffer);
-                callable = reinterpret_cast<Callable_interface*>(sbo_base::sbo_buffer);
+                other.callable->move_constructor_delegate(sbo_buffer);
+                callable = reinterpret_cast<Callable_interface<Ret, Args...>*>(sbo_buffer);
             } else {
                 acquire_callable(other.callable);
             }
@@ -181,11 +225,23 @@ namespace atul {
                 return *this;
             }
 
-            //TODO: Revise
-
             release_callable();
             a_base::operator=(rhs);
-            callable = acquire_callable(rhs.callable);
+
+            if (!rhs.callable) {
+                return *this;
+            }
+
+            std::byte* target = nullptr;
+            if (rhs.is_sbo_in_use()) {
+                target = sbo_buffer;
+            } else {
+                auto allocator = a_base::get_allocator();
+                target = allocator.allocate(rhs.callable->size_of());
+            }
+
+            rhs.callable->copy_constructor_delegate(target);
+            callable = reinterpret_cast<Callable_interface<Ret, Args...>*>(target);
 
             return *this;
         }
@@ -194,11 +250,24 @@ namespace atul {
             if (this == &rhs) {
                 return *this;
             }
-            //TODO: Revise
 
             release_callable();
-            a_base::operator=(std::move(rhs));
-            callable = std::exchange(rhs.callable, nullptr);
+            a_base::operator=(rhs);
+
+            if (!rhs.callable) {
+                return *this;
+            }
+
+            std::byte* target = nullptr;
+            if (rhs.is_sbo_in_use()) {
+                target = sbo_buffer;
+            } else {
+                auto allocator = a_base::get_allocator();
+                target = allocator.allocate(rhs.callable->size_of());
+            }
+
+            rhs.callable->move_constructor_delegate(target);
+            callable = reinterpret_cast<Callable_interface<Ret, Args...>*>(target);
 
             return *this;
         }
@@ -226,9 +295,272 @@ namespace atul {
             return callable == nullptr;
         }
 
+        [[nodiscard]]
+        const std::type_info& target_type() const noexcept {
+            if (callable) {
+                return callable->target_type();
+            } else {
+                return typeid(void);
+            }
+        }
+
+        template<class T>
+        [[nodiscard]]
+        T* target() noexcept {
+            if  (typeid(T) == target_type() && callable) {
+                return reinterpret_cast<T*>(callable->target());
+            } else {
+                return nullptr;
+            }
+        }
+
         //=================================================
-        // Target access
+        // Misc.
         //=================================================
+
+        void swap(AA_SBO_function& other) noexcept {
+            //TODO: Consider using swap function from allocator-aware base
+            if (is_sbo_is_use()) {
+                AA_SBO_function tmp = std::move(*this);
+                *this = std::move(other);
+                other = std::move(tmp);
+            } else {
+                //TODO: Complete
+            }
+        }
+
+        Ret operator()(Args&&...args) {
+            if (!callable) {
+                throw std::bad_function_call();
+            }
+
+            return callable->call(std::forward<Args>(args)...);
+        }
+
+    private:
+
+        //=================================================
+        // Instance members
+        //=================================================
+
+        Callable_interface<Ret, Args...>* callable = nullptr;
+
+        std::byte sbo_buffer[SB_size] {};
+
+        //=================================================
+        // Helper functions
+        //=================================================
+
+        [[nodiscard]]
+        bool is_sbo_is_use() {
+            return reinterpret_cast<std::byte*>(callable) == sbo_buffer;
+        }
+
+        template<class Callable>
+        void acquire_callable(const Callable& c) {
+            using callable_type = Callable_wrapper<Callable, Ret, Args...>;
+            constexpr std::size_t required_size = sizeof(callable_type);
+            constexpr std::size_t required_alignment = alignof(callable_type);
+
+            const bool use_sb =
+                (std::extent_v<decltype(sbo_buffer)> <= required_size) &&
+                required_alignment <= alignof(decltype(sbo_buffer));
+
+            if (use_sb) {
+                auto* alloc = reinterpret_cast<Callable_wrapper<Callable, Ret, Args...>*>(sbo_buffer);
+                new (alloc) Callable_wrapper<Callable, Ret, Args...>(c);
+                callable = alloc;
+            } else {
+                auto allocator = a_base::get_allocator();
+                std::byte* allocation = allocator.allocate(sizeof(Callable_wrapper<Callable, Ret, Args...>));
+                if (allocation == nullptr) {
+                    throw std::bad_alloc();
+                }
+
+                auto* alloc = reinterpret_cast<Callable_wrapper<Callable, Ret, Args...>*>(allocation);
+                new (alloc) Callable_wrapper<Callable, Ret, Args...>(c);
+
+                callable = alloc;
+            }
+        }
+
+        template<class Callable>
+        void acquire_callable(Callable&& c) {
+            using callable_type = Callable_wrapper<Callable, Ret, Args...>;
+            constexpr std::size_t required_size = sizeof(callable_type);
+            constexpr std::size_t required_alignment = alignof(callable_type);
+
+            const bool use_sb =
+                (std::extent_v<decltype(sbo_buffer)> <= required_size) &&
+                required_alignment <= alignof(decltype(sbo_buffer));
+
+            if (use_sb) {
+                auto* alloc = reinterpret_cast<Callable_wrapper<Callable, Ret, Args...>*>(sbo_buffer);
+                new (alloc) Callable_wrapper<Callable, Ret, Args...>(std::forward<Callable>(c));
+                callable = alloc;
+            } else {
+                auto allocator = a_base::get_allocator();
+                std::byte* allocation = allocator.allocate(sizeof(Callable_wrapper<Callable, Ret, Args...>));
+                if (allocation == nullptr) {
+                    throw std::bad_alloc();
+                }
+
+                auto* alloc = reinterpret_cast<Callable_wrapper<Callable, Ret, Args...>*>(allocation);
+                new (alloc) Callable_wrapper<Callable, Ret, Args...>(std::forward<Callable>(c));
+
+                callable = alloc;
+            }
+        }
+
+        void release_callable() {
+            if (is_sbo_is_use()) {
+                callable->~Callable_interface();
+            } else {
+                if (callable) {
+                    callable->~Callable_interface();
+                    auto allocator = a_base::get_allocator();
+                    allocator.deallocate(reinterpret_cast<std::byte*>(callable), sizeof(*callable));
+                }
+            }
+        }
+
+    };
+
+    template<class A, class Ret, class...Args>
+    class AA_SBO_function<A, 0, Ret(Args...)> : public aul::Allocator_aware_base<A> {
+        using a_base = aul::Allocator_aware_base<A>;
+        
+    public:
+
+        //=================================================
+        // Type aliases
+        //=================================================
+
+        using return_type = Ret;
+
+        //=================================================
+        // -ctors
+        //=================================================
+
+        AA_SBO_function() = default;
+
+        explicit AA_SBO_function(std::nullptr_t):
+            callable() {}
+
+        AA_SBO_function(const AA_SBO_function& other):
+            a_base(other)
+        {
+            if (!other.callable) {
+                return;
+            }
+            acquire_callable(other.callable);
+        }
+
+        AA_SBO_function(AA_SBO_function&& other) noexcept:
+            a_base(std::move(other)),
+            callable(std::exchange(other.callable, nullptr))
+        {
+            if (!other.callable) {
+                return;
+            }
+            acquire_callable(other.callable);
+        }
+
+        template<class Callable>
+        AA_SBO_function(const A& a, Callable&& callable):
+            a_base(a),
+            callable()
+        {
+            acquire_callable<Callable>(std::forward<Callable>(callable));
+        }
+
+        template<class Callable>
+        explicit AA_SBO_function(Callable&& callable):
+            AA_SBO_function(A{}, std::forward<Callable>(callable)) {}
+
+        template<class Callable>
+        AA_SBO_function(const A& a, Callable* callable):
+            a_base(a)
+        {
+            acquire_callable<Callable*>(callable);
+        }
+
+        template<class Callable>
+        explicit AA_SBO_function(Callable* callable):
+            AA_SBO_function(A{}, callable) {}
+
+        ~AA_SBO_function() {
+            release_callable();
+        }
+
+        //=================================================
+        // Assignment operators
+        //=================================================
+
+        AA_SBO_function& operator=(const AA_SBO_function& rhs) noexcept {
+            if (this == &rhs) {
+                return *this;
+            }
+
+            release_callable();
+            a_base::operator=(rhs);
+
+            if (!rhs.callable) {
+                return *this;
+            }
+
+            auto allocator = a_base::get_allocator();
+            std::byte* target = allocator.allocate(rhs.callable->size_of());
+
+            rhs.callable->copy_constructor_delegate(target);
+            callable = reinterpret_cast<Callable_interface<Ret, Args...>*>(target);
+
+            return *this;
+        }
+
+        AA_SBO_function& operator=(AA_SBO_function&& rhs) noexcept {
+            if (this == &rhs) {
+                return *this;
+            }
+
+            release_callable();
+            a_base::operator=(rhs);
+
+            if (!rhs.callable) {
+                return *this;
+            }
+
+            auto allocator = a_base::get_allocator();
+            std::byte* target = allocator.allocate(rhs.callable->size_of());
+
+            rhs.callable->move_constructor_delegate(target);
+            callable = reinterpret_cast<Callable_interface<Ret, Args...>*>(target);
+
+            return *this;
+        }
+
+        template<class C>
+        AA_SBO_function& operator=(C&& callable) {
+            release_callable();
+            this->callable = acquire_callable(callable);
+            return *this;
+        }
+
+        template<class C>
+        AA_SBO_function& operator=(std::reference_wrapper<C> callable) noexcept {
+            release_callable();
+            this->callable = acquire_callable(callable);
+            return *this;
+        }
+
+        //=================================================
+        // Accessors
+        //=================================================
+
+        [[nodiscard]]
+        explicit operator bool() const {
+            return callable == nullptr;
+        }
 
         [[nodiscard]]
         const std::type_info& target_type() const noexcept {
@@ -254,12 +586,8 @@ namespace atul {
         //=================================================
 
         void swap(AA_SBO_function& other) noexcept {
-            //TODO: Properly use swap function from allocator-aware base
-            if (is_sbo_is_use()) {
-                AA_SBO_function tmp = std::move(*this);
-                *this = std::move(other);
-                other = std::move(tmp);
-            }
+            a_base::swap(other);
+            std::swap(callable, other.callable);
         }
 
         Ret operator()(Args&&...args) {
@@ -276,86 +604,51 @@ namespace atul {
         // Instance members
         //=================================================
 
-        Callable_interface* callable = nullptr;
+        Callable_interface<Ret, Args...>* callable = nullptr;
 
         //=================================================
-        // Helpers
+        // Helper functions
         //=================================================
-
-        [[nodiscard]]
-        bool is_sbo_is_use() {
-            return reinterpret_cast<std::byte*>(callable) == sbo_base::sbo_buffer;
-        }
 
         template<class Callable>
         void acquire_callable(const Callable& c) {
-            using callable_type = Callable_wrapper<Callable>;
-            constexpr std::size_t required_size = sizeof(callable_type);
-            constexpr std::size_t required_alignment = alignof(callable_type);
-
-            const bool use_sb =
-                (std::extent_v<decltype(sbo_base::sbo_buffer)> <= required_size) &&
-                required_alignment <= alignof(sbo_base::sbo_buffer);
-
-            if (use_sb) {
-                auto* alloc = reinterpret_cast<Callable_wrapper<Callable>*>(sbo_base::sbo_buffer);
-                new (alloc) Callable_wrapper<Callable>(c);
-                callable = alloc;
-            } else {
-                auto allocator = a_base::get_allocator();
-                std::byte* allocation = allocator.allocate(sizeof(Callable_wrapper<Callable>));
-                if (allocation == nullptr) {
-                    throw std::bad_alloc();
-                }
-
-                auto* alloc = reinterpret_cast<Callable_wrapper<Callable>*>(allocation);
-                new (alloc) Callable_wrapper<Callable>(c);
-
-                callable = alloc;
+            auto allocator = a_base::get_allocator();
+            std::byte* allocation = allocator.allocate(sizeof(Callable_wrapper<Callable, Ret, Args...>));
+            if (allocation == nullptr) {
+                throw std::bad_alloc();
             }
+
+            auto* callable_ptr = reinterpret_cast<Callable_wrapper<Callable, Ret, Args...>*>(allocation);
+            std::allocator_traits<A>::construct(allocator, callable_ptr, c);
+            callable = callable_ptr;
         }
 
         template<class Callable>
         void acquire_callable(Callable&& c) {
-            using callable_type = Callable_wrapper<Callable>;
-            constexpr std::size_t required_size = sizeof(callable_type);
-            constexpr std::size_t required_alignment = alignof(callable_type);
-
-            const bool use_sb =
-                (std::extent_v<decltype(sbo_base::sbo_buffer)> <= required_size) &&
-                required_alignment <= alignof(sbo_base::sbo_buffer);
-
-            if (use_sb) {
-                auto* alloc = reinterpret_cast<Callable_wrapper<Callable>*>(sbo_base::sbo_buffer);
-                new (alloc) Callable_wrapper<Callable>(std::forward<Callable>(c));
-                callable = alloc;
-            } else {
-                auto allocator = a_base::get_allocator();
-                std::byte* allocation = allocator.allocate(sizeof(Callable_wrapper<Callable>));
-                if (allocation == nullptr) {
-                    throw std::bad_alloc();
-                }
-
-                auto* alloc = reinterpret_cast<Callable_wrapper<Callable>*>(allocation);
-                new (alloc) Callable_wrapper<Callable>(std::forward<Callable>(c));
-
-                callable = alloc;
+            auto allocator = a_base::get_allocator();
+            std::byte* allocation = allocator.allocate(sizeof(Callable_wrapper<Callable, Ret, Args...>));
+            if (allocation == nullptr) {
+                throw std::bad_alloc();
             }
+
+            auto* callable_ptr = reinterpret_cast<Callable_wrapper<Callable, Ret, Args...>*>(allocation);
+            std::allocator_traits<A>::construct(allocator, callable_ptr, std::forward<Callable>(c));
+            callable = callable_ptr;
         }
 
         void release_callable() {
-            if (is_sbo_is_use()) {
-                callable->~Callable_interface();
-            } else {
-                if (callable) {
-                    callable->~Callable_interface();
-                    auto allocator = a_base::get_allocator();
-                    allocator.deallocate(reinterpret_cast<std::byte*>(callable), sizeof(*callable));
-                }
+            if (callable) {
+                auto allocator = a_base::get_allocator();
+                std::allocator_traits<A>::destroy(allocator, callable);
+                allocator.deallocate(reinterpret_cast<std::byte*>(callable), sizeof(*callable));
             }
         }
 
     };
+
+    //=====================================================
+    // Convenience type aliases
+    //=====================================================
 
     template<class C>
     using Function = AA_SBO_function<std::allocator<std::byte>, 0, C>;
