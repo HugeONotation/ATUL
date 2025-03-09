@@ -9,6 +9,15 @@
 
 namespace atul {
 
+    [[nodiscard]]
+    constexpr std::size_t compute_sbo_size(
+        std::size_t size_request,
+        std::size_t alignment_request
+    ) {
+        // Round up to next multiple of alignment
+        return (size_request / alignment_request + static_cast<bool>(size_request % alignment_request)) * alignment_request;
+    }
+
     //=====================================================
     // Callable wrappers
     //=====================================================
@@ -44,25 +53,34 @@ namespace atul {
     struct Callable_wrapper final : Callable_interface<Ret, Args...> {
 
         explicit Callable_wrapper(const Callable& c):
-            callable(c) {}
+            callable(c)
+        {
+            static_assert(std::is_copy_constructible_v<Callable>);
+        }
 
         Callable_wrapper(const Callable_wrapper& other):
             callable(other.callable)
-        {}
+        {
+            static_assert(std::is_copy_constructible_v<Callable>);
+        }
 
         Callable_wrapper(Callable_wrapper&& other) :
             callable(std::forward<Callable>(other.callable))
-        {}
+        {
+            static_assert(std::is_move_constructible_v<Callable>);
+        }
 
         Ret call(Args&&...args) override {
             return callable(std::forward<Args>(args)...);
         }
 
         void move_constructor_delegate(std::byte* ptr) override {
+            static_assert(std::is_move_constructible_v<Callable>);
             new (ptr) Callable_wrapper{std::move(*this)};
         }
 
         void copy_constructor_delegate(std::byte* ptr) override {
+            static_assert(std::is_copy_constructible_v<Callable>);
             new (ptr) Callable_wrapper{*this};
         }
 
@@ -92,27 +110,27 @@ namespace atul {
 
         Callable_wrapper(Callable_wrapper&&) noexcept {}
 
-        Ret call(Args&&...args) final {
+        Ret call(Args&&...args) override {
             return callable(std::forward<Args>(args)...);
         }
 
-        void move_constructor_delegate(std::byte* ptr) final {
+        void move_constructor_delegate(std::byte* ptr) override {
             new (ptr) Callable_wrapper{std::move(*this)};
         }
 
-        void copy_constructor_delegate(std::byte* ptr) final {
+        void copy_constructor_delegate(std::byte* ptr) override {
             new (ptr) Callable_wrapper{*this};
         }
 
-        std::size_t size_of() final {
+        std::size_t size_of() override {
             return sizeof(Callable_wrapper);
         }
 
-        const std::type_info& target_type() final {
+        const std::type_info& target_type() override {
             return typeid(Callable);
         }
 
-        void* target() final {
+        void* target() override {
             return reinterpret_cast<void*>(&callable);
         }
 
@@ -138,16 +156,33 @@ namespace atul {
     /// @tparam Ret Callable return type
     /// @tparam Args Callable argument types
     template<class A, std::size_t SB_size, class Ret, class...Args>
-    class AA_SBO_function<A, SB_size, Ret (Args...)> : public aul::Allocator_aware_base<A> {
-        using a_base = aul::Allocator_aware_base<A>;
+    class AA_SBO_function<A, SB_size, Ret (Args...)> : public aul::Allocator_aware_base<typename std::allocator_traits<A>::template rebind_alloc<std::byte>> {
+        using a_base = aul::Allocator_aware_base<typename std::allocator_traits<A>::template rebind_alloc<std::byte>>;
 
     public:
+
+        //=================================================
+        // Constants
+        //=================================================
+
+        static constexpr std::size_t small_buffer_size =
+            compute_sbo_size(
+                SB_size,
+                std::max(
+                    alignof(void*),
+                    alignof(a_base)
+                )
+            );
 
         //=================================================
         // Type aliases
         //=================================================
 
         using return_type = Ret;
+
+        using allocator_type = typename std::allocator_traits<A>::template rebind_alloc<std::byte>;
+
+        using pointer = typename std::allocator_traits<A>::pointer;
 
         //=================================================
         // -ctors
@@ -190,7 +225,7 @@ namespace atul {
         }
 
         template<class Callable>
-        AA_SBO_function(const A& a, Callable&& callable):
+        AA_SBO_function(const allocator_type& a, Callable&& callable):
             a_base(a),
             callable()
         {
@@ -199,10 +234,10 @@ namespace atul {
 
         template<class Callable>
         explicit AA_SBO_function(Callable&& callable):
-            AA_SBO_function(A{}, std::forward<Callable>(callable)) {}
+            AA_SBO_function(allocator_type{}, std::forward<Callable>(callable)) {}
 
         template<class Callable>
-        AA_SBO_function(const A& a, Callable* callable):
+        AA_SBO_function(const allocator_type& a, Callable* callable):
             a_base(a)
         {
             acquire_callable<Callable*>(callable);
@@ -345,7 +380,7 @@ namespace atul {
 
         Callable_interface<Ret, Args...>* callable = nullptr;
 
-        std::byte sbo_buffer[SB_size] {};
+        std::byte sbo_buffer[small_buffer_size] {};
 
         //=================================================
         // Helper functions
@@ -427,9 +462,9 @@ namespace atul {
     };
 
     template<class A, class Ret, class...Args>
-    class AA_SBO_function<A, 0, Ret(Args...)> : public aul::Allocator_aware_base<A> {
-        using a_base = aul::Allocator_aware_base<A>;
-        
+    class AA_SBO_function<A, 0, Ret(Args...)> : public aul::Allocator_aware_base<typename std::allocator_traits<A>::template rebind_alloc<std::byte>> {
+        using a_base = aul::Allocator_aware_base<typename std::allocator_traits<A>::template rebind_alloc<std::byte>>;
+
     public:
 
         //=================================================
@@ -437,6 +472,10 @@ namespace atul {
         //=================================================
 
         using return_type = Ret;
+
+        using allocator_type = typename std::allocator_traits<A>::template rebind_alloc<std::byte>;
+
+        using pointer = typename std::allocator_traits<A>::pointer;
 
         //=================================================
         // -ctors
@@ -479,7 +518,7 @@ namespace atul {
             AA_SBO_function(A{}, std::forward<Callable>(callable)) {}
 
         template<class Callable>
-        AA_SBO_function(const A& a, Callable* callable):
+        AA_SBO_function(const allocator_type& a, Callable* callable):
             a_base(a)
         {
             acquire_callable<Callable*>(callable);
@@ -487,7 +526,7 @@ namespace atul {
 
         template<class Callable>
         explicit AA_SBO_function(Callable* callable):
-            AA_SBO_function(A{}, callable) {}
+            AA_SBO_function(allocator_type{}, callable) {}
 
         ~AA_SBO_function() {
             release_callable();
@@ -619,7 +658,7 @@ namespace atul {
             }
 
             auto* callable_ptr = reinterpret_cast<Callable_wrapper<Callable, Ret, Args...>*>(allocation);
-            std::allocator_traits<A>::construct(allocator, callable_ptr, c);
+            new (callable_ptr) Callable_wrapper<Callable, Ret, Args...>{c};
             callable = callable_ptr;
         }
 
@@ -632,14 +671,14 @@ namespace atul {
             }
 
             auto* callable_ptr = reinterpret_cast<Callable_wrapper<Callable, Ret, Args...>*>(allocation);
-            std::allocator_traits<A>::construct(allocator, callable_ptr, std::forward<Callable>(c));
+            new (callable_ptr) Callable_wrapper<Callable, Ret, Args...>{std::forward<Callable>(c)};
             callable = callable_ptr;
         }
 
         void release_callable() {
             if (callable) {
+                callable->~Callable_interface();
                 auto allocator = a_base::get_allocator();
-                std::allocator_traits<A>::destroy(allocator, callable);
                 allocator.deallocate(reinterpret_cast<std::byte*>(callable), sizeof(*callable));
             }
         }
@@ -654,7 +693,7 @@ namespace atul {
     using Function = AA_SBO_function<std::allocator<std::byte>, 0, C>;
 
     template<class A, class C>
-    using AA_Function = AA_SBO_function<A, 0, C>;
+    using AA_function = AA_SBO_function<A, 0, C>;
 
     template<std::size_t SB_size, class C>
     using SBO_function = AA_SBO_function<std::allocator<std::byte>, SB_size, C>;
